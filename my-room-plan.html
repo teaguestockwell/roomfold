@@ -316,10 +316,15 @@ function sceneFaces(r,m){
   for(const p of r.pieces)pieceSolids(p,spec(p.type),box);
   return faces;
 }
-function drawModel(){
-  if(!in3D()||!model.clientWidth||!model.clientHeight)return;
-  const r=room(),m=camera=cameraFor(r);model.setAttribute("viewBox",`0 0 ${m.w} ${m.h}`);
-  const poly=(points,fill,attrs="")=>`<polygon points="${pts3(points.map(p=>project3(p,m)))}" fill="${fill}" ${attrs}/>`;
+function compileMesh(r,m,key){
+  const world=[],indices=[],unique=new Map();
+  const poly=(points,fill,attrs="")=>{
+    indices.push(points.map(p=>{
+      const k=p.join(",");if(!unique.has(k)){unique.set(k,world.length);world.push(p)}
+      return unique.get(k);
+    }));
+    return `<polygon points="" fill="${fill}" ${attrs}/>`;
+  };
   const base=[[-3,-3],[r.w+3,-3],[r.w+3,r.d+3],[-3,r.d+3]],projFloor=z=>base.map(([x,y])=>[x,y,z]);
   let out=`<defs><pattern id="floorboards" patternUnits="userSpaceOnUse" width="18" height="92"><rect width="18" height="92" fill="#eae1ca"/><rect width="9" height="92" fill="#e5dbc4"/><path d="M0 0V92M9 0V92M0 41h9m0-40h9" fill="none" stroke="#bfb59d" stroke-width=".48"/></pattern><filter id="ground-shadow" x="-25%" y="-40%" width="150%" height="200%"><feGaussianBlur stdDeviation="5"/></filter><clipPath id="inside-floor"><rect width="${r.w}" height="${r.d}"/></clipPath></defs>`;
   out+=poly(projFloor(-8),"#0a1512",'opacity=".65" filter="url(#ground-shadow)"');
@@ -327,8 +332,7 @@ function drawModel(){
     const a=base[i],b=base[(i+1)%4],dx=b[0]-a[0],dy=b[1]-a[1];if(dy*m.s-dx*m.c>0)out+=poly([[...a,-4],[...b,-4],[...b,0],[...a,0]],materials.slab[i%2?0:1]);
   }
   out+=poly(projFloor(0),materials.slab[2]);
-  const [ox,oy]=project3([0,0,0]),A=m.scale*m.c,B=m.scale*m.s*m.v,C=-m.scale*m.s,D=m.scale*m.c*m.v;
-  out+=`<g transform="matrix(${A} ${B} ${C} ${D} ${ox} ${oy})" clip-path="url(#inside-floor)"><rect width="${r.w}" height="${r.d}" fill="url(#floorboards)"/>`;
+  out+=`<g transform="" clip-path="url(#inside-floor)"><rect width="${r.w}" height="${r.d}" fill="url(#floorboards)"/>`;
   if(r.suite){const a=r.section,X=r.w-a.run+a.split;out+=`<defs><pattern id="bath-tile" width="12" height="12" patternUnits="userSpaceOnUse"><rect width="12" height="12" fill="#a6c3b7"/><path d="M12 0H0V12" fill="none" stroke="#e3e9d6" stroke-width=".9"/></pattern></defs><rect x="${X}" y="${a.top}" width="${r.w-X}" height="${a.depth}" fill="url(#bath-tile)"/>`}
   for(const [x,y,X,Y] of lines(r))out+=`<path d="M${x+2} ${y+2}L${X+2} ${Y+2}" fill="none" stroke="#7e8164" stroke-opacity=".19" stroke-width="4"/>`;
   for(const p of r.pieces){const s=spec(p.type),[w,d]=footprint(s,p.rot);out+=`<rect x="${p.x-w/2+1.5}" y="${p.y-d/2+2}" width="${w}" height="${d}" fill="#6b7159" opacity=".22"/>`}
@@ -338,6 +342,22 @@ function drawModel(){
     out+=poly(corners(f),color,`${item} stroke="${color}" stroke-width=".42" stroke-linejoin="round" ${glass?'opacity=".46"':""}`);
   });
   model.innerHTML=out;
+  return {key,world,indices,nodes:model.querySelectorAll("polygon"),floor:model.querySelector("g[clip-path]")};
+}
+let mesh=null;
+const region=v=>[Math.sign(v),Math.abs(v)<1e-7,Math.abs(v)>.001];
+function drawModel(){
+  if(!in3D()||!model.clientWidth||!model.clientHeight)return;
+  const r=room(),m=camera=cameraFor(r),viewBox=`0 0 ${m.w} ${m.h}`;
+  if(model.getAttribute("viewBox")!==viewBox)model.setAttribute("viewBox",viewBox);
+  const key=JSON.stringify([r,plan.catalog,selection,viewer.cut,region(m.s),region(m.c)]);
+  if(mesh?.key!==key)mesh=compileMesh(r,m,key);
+  const xy=mesh.world.map(p=>{const [x,y]=project3(p,m);return round(x,2)+","+round(y,2)});
+  for(let i=0;i<mesh.indices.length;i++){
+    const [a,b,c,d]=mesh.indices[i];mesh.nodes[i].setAttribute("points",xy[a]+" "+xy[b]+" "+xy[c]+" "+xy[d]);
+  }
+  const [ox,oy]=project3([0,0,0]),A=m.scale*m.c,B=m.scale*m.s*m.v,C=-m.scale*m.s,D=m.scale*m.c*m.v;
+  mesh.floor.setAttribute("transform",`matrix(${A} ${B} ${C} ${D} ${ox} ${oy})`);
 }
 function queueModel(){if(!frame)frame=requestAnimationFrame(()=>{frame=0;drawModel()})}
 function modelThumbnail(s){
