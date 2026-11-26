@@ -38,11 +38,11 @@ html,body,#world{height:100%;margin:0;overflow:hidden}html{scrollbar-gutter:auto
 <symbol id="i-guide" viewBox="0 0 24 24"><path d="M12 6c-4-3-7-2-9-1v14c3-2 6-2 9 0 3-2 6-2 9 0V5c-2-1-5-2-9 1zm0 0v13"></path></symbol>
 </defs></svg>
 <main id="world">
-<div class="stage model-stage" id="stage"><svg id="board" hidden="" role="group" aria-label="Measured 2D room plan"></svg><svg id="model" tabindex="0" role="group" aria-label="3D room. Drag or use arrow keys to orbit. Drag furniture to move it."></svg></div>
+<div class="stage model-stage" id="stage"><svg id="board" hidden="" role="group" aria-label="Measured 2D room plan"></svg><canvas id="model" tabindex="0" role="group" aria-label="3D room. Drag or use arrow keys to orbit. Drag furniture to move it."></canvas></div>
 <header class="hud identity"><span class="eyebrow">ROOMFOLD / BUILD MODE</span><h1 id="room-name"></h1><span id="room-meta" class="meta"></span></header>
 <div class="hud mode-hud" role="group" aria-label="Room view"><button id="view-model" aria-pressed="true">3D</button><button id="view-plan" aria-pressed="false">Plan</button></div>
 <div class="selected" id="selection" hidden=""><div><strong id="piece-name"></strong><small id="piece-meta"></small></div><div class="inline"><button class="small" id="rotate">Rotate 90°</button><button class="small" id="edit-piece">Position</button><button class="small" id="remove-piece">Remove</button></div></div>
-<div class="hud controls-hint" id="hint"></div>
+<div class="hud controls-hint" id="hint" role="status"></div>
 <button class="hud fab" id="build" aria-controls="tray" aria-expanded="false"><span class="plus" aria-hidden="true">+</span> Build <span class="keys">B</span></button>
 <aside class="tray" id="tray" hidden="" aria-label="Build tools">
 <section id="tool-home"><header><div><div class="kicker">Roomfold / Studio</div><h2>Build tools</h2></div><span id="status" class="status" aria-live="polite">Offline</span></header>
@@ -121,7 +121,7 @@ const dims=(a,b)=>fmt(a)+" \u00d7 "+fmt(b);
 function notify(s){$("toast").textContent=s;$("toast").hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$("toast").hidden=true,3200)}
 function persist(){try{localStorage.setItem(key,JSON.stringify(plan));$("status").textContent="Saved in browser";$("status").classList.remove("bad")}catch{$("status").textContent="Use Save HTML copy";$("status").classList.add("bad")}}
 function remember(state){history.push(state);if(history.length>60)history.shift()}
-function change(fn){const before=JSON.stringify(plan);fn();if(before!==JSON.stringify(plan)){remember(before);persist()}render()}
+function change(fn){const before=JSON.stringify(plan);fn();if(before!==JSON.stringify(plan)){mesh=null;remember(before);persist()}render()}
 function undo(){if(!history.length)return;plan=JSON.parse(history.pop());selection=null;persist();render();notify("Last change undone.")}
 const walls=["A \u00b7 Top","B \u00b7 Right","C \u00b7 Bottom","D \u00b7 Left"];
 function vertices(r){return [[0,0],[r.w,0],[r.w,r.d],[0,r.d]]}
@@ -207,31 +207,19 @@ function artwork(kind,w,d){
 const rawDim=v=>value(v)+(u()==="in"?"\u2033":" cm");
 const narrow=innerWidth<600,model=$("model"),home={yaw:narrow?-.39:-1.04,tilt:narrow?.98:1.09,zoom:1,panX:0,panY:0,cut:true,mode:"model"};
 const viewer={...home,...embedded?.viewer};
-let camera=null,gesture=null,frame=0;
-const in3D=()=>viewer.mode==="model";
+let gpu=null,mesh=null,camera=null,gesture=null,frame=0;
+const in3D=()=>!!gpu&&viewer.mode==="model";
 const previewCeiling=r=>r.h??Math.max(96,...r.openings.map(o=>(o.type==="window"?o.sill:0)+(o.h??1)+(o.headGap??0)));
 function cameraFor(r){
   const w=model.clientWidth,h=model.clientHeight,c=Math.cos(viewer.yaw),s=Math.sin(viewer.yaw),v=Math.sin(viewer.tilt),k=Math.cos(viewer.tilt);
-  const height=Math.max(previewCeiling(r),r.section?.height??0,...r.pieces.map(p=>spec(p.type).h));
+  const height=mesh.height;
   const scale=viewer.zoom*Math.min(w*.89/(Math.abs(c)*(r.w+8)+Math.abs(s)*(r.d+8)),h*.82/((Math.abs(s)*(r.w+8)+Math.abs(c)*(r.d+8))*v+(height+5)*k));
-  return {w,h,c,s,v,k,scale,x:r.w/2,y:r.d/2,z:(height-4)/2,cx:w*(.5+viewer.panX),cy:h*(.52+viewer.panY),dir:[s,c,1]};
+  return {w,h,c,s,v,k,scale,x:r.w/2,y:r.d/2,z:(height-4)/2,cx:w*(.5+viewer.panX),cy:h*(.52+viewer.panY),dir:[s*k,c*k,v],
+    cut:[-c,s,c,-s].map(n=>Number(viewer.cut&&n>.001))};
 }
 function project3([x,y,z],m=camera){x-=m.x;y-=m.y;return [m.cx+m.scale*(m.c*x-m.s*y),m.cy+m.scale*((m.s*x+m.c*y)*m.v-(z-m.z)*m.k)]}
 function groundAt(e){const m=camera,rect=model.getBoundingClientRect(),a=(e.clientX-rect.left-m.cx)/m.scale,b=((e.clientY-rect.top-m.cy)/m.scale-m.z*m.k)/m.v;return {x:m.x+m.c*a+m.s*b,y:m.y-m.s*a+m.c*b}}
 const pts3=arr=>arr.map(p=>p.map(n=>round(n,2)).join(",")).join(" ");
-function corners(f){const i=f.axis,a=(i+1)%3,b=(i+2)%3;return [[0,0],[1,0],[1,1],[0,1]].map(([j,k])=>{const p=f.lo.slice();p[a]=j?f.hi[a]:f.lo[a];p[b]=k?f.hi[b]:f.lo[b];return p})}
-// Split axis-aligned faces at separating planes so long partitions and furniture occlude correctly from either side.
-function orderedFaces(faces,dir,emit){
-  if(!faces.length)return;
-  const pivot=faces[faces.length>>1],axis=pivot.axis,t=pivot.lo[axis],lo=[],same=[],hi=[];
-  for(const f of faces){
-    const a=f.lo[axis],b=f.hi[axis];
-    if(f.axis===axis&&Math.abs(a-t)<1e-8)same.push(f);
-    else if(b<=t)lo.push(f);else if(a>=t)hi.push(f);
-    else{const left={...f,hi:f.hi.slice()},right={...f,lo:f.lo.slice()};left.hi[axis]=right.lo[axis]=t;lo.push(left);hi.push(right)}
-  }
-  const positive=dir[axis]>=0;orderedFaces(positive?lo:hi,dir,emit);same.forEach(emit);orderedFaces(positive?hi:lo,dir,emit);
-}
 const materials={
   wall:["#d3dacb","#e4e6d8","#f6f5e7"],trim:["#bdc8b7","#cdd3c1","#e4e8d9"],
   frame:["#719b99","#8dafaa","#cedfd6"],glass:["#aed5d7","#b9dcdf","#cee4df"],partition:["#a4b49e","#b8c5af","#dce5d3"],
@@ -239,14 +227,14 @@ const materials={
   piece:["#899a8c","#b1bdab","#dae2d2"],selected:["#638671","#87a38d","#c6dac4"],slab:["#8a8f7c","#a2a48d","#eee8d8"]
 };
 Object.assign(materials,{oak:["#a76f48","#bd8a60","#ddb486"],stone:["#b2aa91","#d0c6ad","#faf1dc"],enamel:["#a4b9b3","#c8d7cf","#edf2e5"],ink:["#364940","#485d4e","#637366"],brass:["#a87743","#c9975b","#eac991"],tile:["#628c89","#84aaa2","#c3d9c9"],cloth:["#9d6855","#bd8a72","#d8a48a"],leaf:["#527654","#6c9165","#8ead76"]});
-function fitOut(r,m,H,box){
+function fitOut(r,H,box){
   const f=installations(r),a=r.section,x=r.w-a.run,X=x+a.split,t=a.top,b=t+a.depth;
-  const wall=(x,y,X,Y,near,mat)=>{const v=x===X;box(x-(v?.95:0),y-(v?0:.95),0,X+(v?.95:0),Y+(v?0:.95),viewer.cut&&near?Math.min(10,H):H,mat)};
-  wall(x,t,r.w,t,m.c<0,"tile");box(X-2,t,0,X+2,b,H,"tile");wall(x,b,x+a.lower,b,m.c>0,"tile");wall(0,pocketY(r),a.stub,pocketY(r),m.c>0,"partition");
+  const wall=(x,y,X,Y,side,mat)=>{for(const cut of [false,true])box(x,y-.95,0,X,Y+.95,cut?Math.min(10,H):H,mat,"",cut?-side:side)};
+  wall(x,t,r.w,t,1,"tile");box(X-2,t,0,X+2,b,H,"tile");wall(x,b,x+a.lower,b,3,"tile");wall(0,pocketY(r),a.stub,pocketY(r),3,"partition");
   const door=bathDoor(r),dh=Math.min(door.h,H),j=Math.min(.65,(door.right-door.left)/5);
   box(door.left,b-.65,.25,door.right,b+.65,dh,"door");
   box(door.left,b-.9,0,door.left+j,b+.9,dh,"oak");box(door.right-j,b-.9,0,door.right,b+.9,dh,"oak");
-  if(!(viewer.cut&&m.c>0))box(door.left,b-.95,dh,door.right,b+.95,H,"tile");
+  box(door.left,b-.95,dh,door.right,b+.95,H,"tile","",3);
   // Fixture solids use normalized footprints; architectural dimensions stay in inches.
   const within=(rect)=>{const [x,y,X,Y]=rect,w=X-x,d=Y-y;return (u,v,z,U,V,Z,mat)=>box(x+w*u,y+d*v,clamp(z,0,H),x+w*U,y+d*V,clamp(Z,0,H),mat)};
   const work=Math.min(36,H*.48),upper=Math.min(57,H*.69),gal=within(f.galley);
@@ -274,22 +262,15 @@ function pieceSolids(p,s,box){
   else if(s.kind==="plant"){add(.23,.23,0,.77,.77,.37,"oak");add(.45,.45,.32,.55,.55,.8,"leaf");add(.04,.37,.49,.76,.65,.64,"leaf");add(.40,.04,.61,.66,.95,.76,"leaf");add(.32,.29,.74,.96,.60,.86,"leaf");add(.23,.4,.79,.52,.69,1,"leaf")}
   else add(0,0,0,1,1,1,s.kind==="fridge"?"enamel":"piece");
 }
-function sceneFaces(r,m){
-  const faces=[],H=previewCeiling(r),thick=3;
-  function box(x,y,z,X,Y,Z,mat,id=""){
-    if(x>=X||y>=Y||z>=Z)return;
-    const min=[x,y,z],max=[X,Y,Z];for(let axis=0;axis<3;axis++){
-      if(Math.abs(m.dir[axis])<1e-7)continue;
-      const lo=min.slice(),hi=max.slice();lo[axis]=hi[axis]=m.dir[axis]>0?max[axis]:min[axis];
-      faces.push({lo,hi,axis,mat,id});
-    }
-  }
-  for(let i=0;i<4;i++){
+function sceneBoxes(r,box){
+  const H=previewCeiling(r),thick=3;
+  // Positive side = intact wall; negative = cutaway. Upload both once.
+  for(let i=0;i<4;i++)for(const cut of [false,true]){
     const [x,y]=vertices(r)[i],dx=[1,0,-1,0][i],dy=[0,1,0,-1][i],length=wallLength(r,i);
-    const cut=viewer.cut&&(dy*m.s-dx*m.c)>.001,cap=cut?Math.min(5,H):H;
+    const cap=cut?Math.min(5,H):H,side=cut?-(i+1):i+1;
     const band=(a,b,z,Z,mat="wall",t=0,T=thick,limit=cap)=>{
       const x1=x+dx*a+dy*t,x2=x+dx*b+dy*T,y1=y+dy*a-dx*t,y2=y+dy*b-dx*T;
-      box(Math.min(x1,x2),Math.min(y1,y2),Math.max(0,z),Math.max(x1,x2),Math.max(y1,y2),Math.min(limit,Z),mat);
+      box(Math.min(x1,x2),Math.min(y1,y2),Math.max(0,z),Math.max(x1,x2),Math.max(y1,y2),Math.min(limit,Z),mat,"",side);
     };
     let from=0;for(const o of [...wallOpenings(r,i),{offset:length}]){
       const a=o.offset,b=a+(o.w||0);if(a>from){band(from,a,0,H);band(from,a,0,3.6,"trim",-.4,0)}if(!o.type)break;
@@ -312,52 +293,105 @@ function sceneFaces(r,m){
     }
   }
   const partHeight=r.section?.height??Math.min(36,H);
-  if(r.suite)fitOut(r,m,H,box);else for(const [x,y,X,Y] of lines(r)){const vertical=x===X;box(x-(vertical?1.3:0),y-(vertical?0:1.3),0,X+(vertical?1.3:0),Y+(vertical?0:1.3),partHeight,"partition")}
+  if(r.suite)fitOut(r,H,box);else for(const [x,y,X,Y] of lines(r)){const vertical=x===X;box(x-(vertical?1.3:0),y-(vertical?0:1.3),0,X+(vertical?1.3:0),Y+(vertical?0:1.3),partHeight,"partition")}
   for(const p of r.pieces)pieceSolids(p,spec(p.type),box);
-  return faces;
 }
-function compileMesh(r,m,key){
-  const world=[],indices=[],unique=new Map();
-  const poly=(points,fill,attrs="")=>{
-    indices.push(points.map(p=>{
-      const k=p.join(",");if(!unique.has(k)){unique.set(k,world.length);world.push(p)}
-      return unique.get(k);
-    }));
-    return `<polygon points="" fill="${fill}" ${attrs}/>`;
-  };
-  const base=[[-3,-3],[r.w+3,-3],[r.w+3,r.d+3],[-3,r.d+3]],projFloor=z=>base.map(([x,y])=>[x,y,z]);
-  let out=`<defs><pattern id="floorboards" patternUnits="userSpaceOnUse" width="18" height="92"><rect width="18" height="92" fill="#eae1ca"/><rect width="9" height="92" fill="#e5dbc4"/><path d="M0 0V92M9 0V92M0 41h9m0-40h9" fill="none" stroke="#bfb59d" stroke-width=".48"/></pattern><filter id="ground-shadow" x="-25%" y="-40%" width="150%" height="200%"><feGaussianBlur stdDeviation="5"/></filter><clipPath id="inside-floor"><rect width="${r.w}" height="${r.d}"/></clipPath></defs>`;
-  out+=poly(projFloor(-8),"#0a1512",'opacity=".65" filter="url(#ground-shadow)"');
-  for(let i=0;i<4;i++){
-    const a=base[i],b=base[(i+1)%4],dx=b[0]-a[0],dy=b[1]-a[1];if(dy*m.s-dx*m.c>0)out+=poly([[...a,-4],[...b,-4],[...b,0],[...a,0]],materials.slab[i%2?0:1]);
+function initGPU(){
+  const gl=model.getContext("webgl2",{depth:true,alpha:true,antialias:true});if(!gl)return null;
+  const program=gl.createProgram();
+  function shader(type,source){
+    const sh=gl.createShader(type);gl.shaderSource(sh,"#version 300 es\n"+source);gl.compileShader(sh);
+    if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(program,sh);gl.deleteShader(sh);
   }
-  out+=poly(projFloor(0),materials.slab[2]);
-  out+=`<g transform="" clip-path="url(#inside-floor)"><rect width="${r.w}" height="${r.d}" fill="url(#floorboards)"/>`;
-  if(r.suite){const a=r.section,X=r.w-a.run+a.split;out+=`<defs><pattern id="bath-tile" width="12" height="12" patternUnits="userSpaceOnUse"><rect width="12" height="12" fill="#a6c3b7"/><path d="M12 0H0V12" fill="none" stroke="#e3e9d6" stroke-width=".9"/></pattern></defs><rect x="${X}" y="${a.top}" width="${r.w-X}" height="${a.depth}" fill="url(#bath-tile)"/>`}
-  for(const [x,y,X,Y] of lines(r))out+=`<path d="M${x+2} ${y+2}L${X+2} ${Y+2}" fill="none" stroke="#7e8164" stroke-opacity=".19" stroke-width="4"/>`;
-  for(const p of r.pieces){const s=spec(p.type),[w,d]=footprint(s,p.rot);out+=`<rect x="${p.x-w/2+1.5}" y="${p.y-d/2+2}" width="${w}" height="${d}" fill="#6b7159" opacity=".22"/>`}
-  out+="</g>";
-  orderedFaces(sceneFaces(r,m),m.dir,f=>{
-    const color=materials[f.mat][f.axis],item=f.id?`data-piece="${esc(f.id)}"`:"",glass=f.mat==="glass";
-    out+=poly(corners(f),color,`${item} stroke="${color}" stroke-width=".42" stroke-linejoin="round" ${glass?'opacity=".46"':""}`);
-  });
-  model.innerHTML=out;
-  return {key,world,indices,nodes:model.querySelectorAll("polygon"),floor:model.querySelector("g[clip-path]")};
+  shader(gl.VERTEX_SHADER,`
+    layout(location=0) in vec3 point; layout(location=1) in vec3 color; layout(location=2) in vec2 flags;
+    uniform mat4 camera; uniform vec4 cut;
+    out vec2 xy; flat out vec3 tint; flat out int finish;
+    void main(){xy=point.xy; tint=color; finish=int(flags.y); gl_Position=camera*vec4(point,1.);
+      int side=int(flags.x); if(side!=0 && ((side<0)!=(cut[max(abs(side)-1,0)]>.5))) gl_Position=vec4(2,2,2,1);
+    }`);
+  shader(gl.FRAGMENT_SHADER,`
+    precision highp float; precision highp int;
+    in vec2 xy; flat in vec3 tint; flat in int finish; uniform vec2 roomSize; out vec4 pixel;
+    void main(){vec3 c=tint; float alpha=1.;
+      if(finish==1 || finish==2){
+        bool wood=finish==1; vec2 period=wood?vec2(9,92):vec2(12);
+        float odd=mod(floor(xy.x/9.),2.); vec2 p=xy+vec2(0,wood?odd*41.:0.);
+        vec2 edge=abs(fract(p/period+.5)-.5)*period;
+        vec2 seam=1.-smoothstep(vec2(0),max(fwidth(xy),vec2(.45)),edge);
+        c=mix(c*(wood?1.-odd*.024:1.),wood?vec3(.75,.71,.62):vec3(.89,.91,.84),max(seam.x,seam.y)*.7);
+      }else if(finish==3)alpha=.46; else if(finish==4)alpha=.22;
+      else if(finish==5){vec2 d=max(-xy,xy-roomSize);alpha=.65*(1.-smoothstep(-6.,9.,max(d.x,d.y)));}
+      pixel=vec4(c,alpha);
+    }`);
+  gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+  gl.useProgram(program);gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+  for(const [i,size,offset] of [[0,3,0],[1,3,12],[2,2,24]]){
+    gl.enableVertexAttribArray(i);gl.vertexAttribPointer(i,size,gl.FLOAT,false,32,offset);
+  }
+  gl.enable(gl.DEPTH_TEST);gl.enable(gl.CULL_FACE);gl.frontFace(gl.CW);
+  gl.enable(gl.BLEND);gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
+  return {gl,matrix:gl.getUniformLocation(program,"camera"),cut:gl.getUniformLocation(program,"cut"),size:gl.getUniformLocation(program,"roomSize")};
 }
-let mesh=null;
-const region=v=>[Math.sign(v),Math.abs(v)<1e-7,Math.abs(v)>.001];
+function uploadRoom(r){
+  const solid=[],glass=[],boxes=[];
+  function quad(points,hex,side=0,finish=0){
+    const n=parseInt(hex.slice(1),16),rgb=[n>>16,(n>>8)&255,n&255].map(v=>v/255),out=finish===3?glass:solid;
+    for(const i of [0,1,2,0,2,3])out.push(...points[i],...rgb,side,finish);
+  }
+  function box(x,y,z,X,Y,Z,mat,id="",side=0){
+    if(x>=X||y>=Y||z>=Z)return;
+    const lo=[x,y,z],hi=[X,Y,Z];boxes.push({lo,hi,id,side});
+    for(let axis=0;axis<3;axis++)for(const high of [false,true]){
+      const a=(axis+1)%3,b=(axis+2)%3;
+      const pts=[[0,0],[1,0],[1,1],[0,1]].map(([i,j])=>{const p=lo.slice();if(high)p[axis]=hi[axis];if(i)p[a]=hi[a];if(j)p[b]=hi[b];return p});
+      quad(high?pts:pts.reverse(),materials[mat][axis],side,mat==="glass"?3:0);
+    }
+  }
+  const floor=(x,y,X,Y,z,color,finish)=>quad([[x,y,z],[X,y,z],[X,Y,z],[x,Y,z]],color,0,finish);
+  floor(-10,-10,r.w+10,r.d+10,-8,"#0a1512",5);
+  box(-3,-3,-4,r.w+3,r.d+3,0,"slab");
+  floor(0,0,r.w,r.d,0,"#eae1ca",1);
+  if(r.suite){const a=r.section;floor(r.w-a.run+a.split,a.top,r.w,a.top+a.depth,0,"#a6c3b7",2)}
+  for(const [x,y,X,Y] of lines(r))floor(x,y,Math.min(r.w,X+4),Math.min(r.d,Y+4),0,"#7e8164",4);
+  for(const p of r.pieces){const [w,d]=footprint(spec(p.type),p.rot),x=p.x+1.5,y=p.y+2;
+    floor(Math.max(0,x-w/2),Math.max(0,y-d/2),Math.min(r.w,x+w/2),Math.min(r.d,y+d/2),0,"#6b7159",4)}
+  const floorCount=solid.length/8;sceneBoxes(r,box);
+  const {gl}=gpu;gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(solid.concat(glass)),gl.STATIC_DRAW);
+  gl.uniform2f(gpu.size,r.w,r.d);
+  return {room:r,selected:selection,boxes,floorCount,opaque:solid.length/8,glass:glass.length/8,
+    height:Math.max(previewCeiling(r),r.section?.height??0,...r.pieces.map(p=>spec(p.type).h))};
+}
 function drawModel(){
   if(!in3D()||!model.clientWidth||!model.clientHeight)return;
-  const r=room(),m=camera=cameraFor(r),viewBox=`0 0 ${m.w} ${m.h}`;
-  if(model.getAttribute("viewBox")!==viewBox)model.setAttribute("viewBox",viewBox);
-  const key=JSON.stringify([r,plan.catalog,selection,viewer.cut,region(m.s),region(m.c)]);
-  if(mesh?.key!==key)mesh=compileMesh(r,m,key);
-  const xy=mesh.world.map(p=>{const [x,y]=project3(p,m);return round(x,2)+","+round(y,2)});
-  for(let i=0;i<mesh.indices.length;i++){
-    const [a,b,c,d]=mesh.indices[i];mesh.nodes[i].setAttribute("points",xy[a]+" "+xy[b]+" "+xy[c]+" "+xy[d]);
+  const r=room();if(mesh?.room!==r||mesh.selected!==selection)mesh=uploadRoom(r);
+  const {gl}=gpu,m=camera=cameraFor(r),dpr=Math.min(devicePixelRatio,2),w=Math.round(m.w*dpr),h=Math.round(m.h*dpr);
+  if(model.width!==w||model.height!==h){model.width=w;model.height=h}
+  const [ox,oy]=project3([0,0,0],m),A=2*m.scale/m.w,B=-2*m.scale/m.h;
+  const range=Math.hypot(r.w,r.d,mesh.height)+32,[dx,dy,dz]=m.dir.map(n=>n/range);
+  gl.viewport(0,0,w,h);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  gl.uniformMatrix4fv(gpu.matrix,false,[A*m.c,B*m.s*m.v,-dx,0, -A*m.s,B*m.c*m.v,-dy,0, 0,-B*m.k,-dz,0,
+    2*ox/m.w-1,1-2*oy/m.h,m.x*dx+m.y*dy+m.z*dz,1]);
+  // Coplanar floor finishes layer in order; furniture and walls use the depth buffer.
+  gl.uniform4fv(gpu.cut,m.cut);gl.depthFunc(gl.ALWAYS);gl.drawArrays(gl.TRIANGLES,0,mesh.floorCount);
+  gl.depthFunc(gl.LEQUAL);gl.drawArrays(gl.TRIANGLES,mesh.floorCount,mesh.opaque-mesh.floorCount);
+  gl.depthMask(false);gl.drawArrays(gl.TRIANGLES,mesh.opaque,mesh.glass);gl.depthMask(true);
+}
+function pickPiece(e){
+  // The orthographic sightline goes from the floor toward the eye. Walls participate too.
+  const p=groundAt(e),origin=[p.x,p.y,0],{dir,cut}=camera;let nearest=-Infinity,id="";
+  for(const box of mesh.boxes){
+    const {side}=box;if(side&&(side<0)!==!!cut[Math.abs(side)-1])continue;
+    let enter=-Infinity,exit=Infinity;
+    for(let i=0;i<3;i++){
+      const a=box.lo[i]-origin[i],b=box.hi[i]-origin[i];
+      if(Math.abs(dir[i])<1e-10){if(a>0||b<0){exit=-Infinity;break}}
+      else{const t=a/dir[i],T=b/dir[i];enter=Math.max(enter,Math.min(t,T));exit=Math.min(exit,Math.max(t,T))}
+    }
+    if(exit!==-Infinity&&enter<=exit&&exit>=nearest){nearest=exit;id=box.id}
   }
-  const [ox,oy]=project3([0,0,0]),A=m.scale*m.c,B=m.scale*m.s*m.v,C=-m.scale*m.s,D=m.scale*m.c*m.v;
-  mesh.floor.setAttribute("transform",`matrix(${A} ${B} ${C} ${D} ${ox} ${oy})`);
+  return id;
 }
 function queueModel(){if(!frame)frame=requestAnimationFrame(()=>{frame=0;drawModel()})}
 function modelThumbnail(s){
@@ -437,6 +471,7 @@ function render(){
   $("board").toggleAttribute("hidden",three);model.toggleAttribute("hidden",!three);
   $("camera-bar").hidden=!three;$("world").classList.toggle("map-mode",!three);$("cutaway").checked=viewer.cut;
   $("hint").textContent=three?(narrow?"Drag to orbit \u00b7 Build to furnish":"Drag to orbit \u00b7 Scroll to zoom \u00b7 Shift-drag to pan"):"Plan view \u00b7 Grid "+(u()==="in"?"12\u2033":"50 cm");
+  $("view-model").disabled=!gpu;if(!gpu)$("hint").textContent="3D unavailable (WebGL2). You can edit and save in Plan view.";
   $("view-model").setAttribute("aria-pressed",three);$("view-plan").setAttribute("aria-pressed",!three);
   $("units").value=u();$("undo").disabled=!history.length;if(three)drawModel();else draw();renderSelection();
   $("gallery-tab").setAttribute("aria-pressed",tab==="gallery");$("placed-tab").setAttribute("aria-pressed",tab==="placed");$("placed-tab").textContent="In room ("+r.pieces.length+")";
@@ -468,10 +503,10 @@ model.onkeydown=e=>{
 };
 model.addEventListener("wheel",e=>{e.preventDefault();if(!gesture)zoomModel(Math.exp(-clamp(e.deltaY,-120,120)*.002))},{passive:false});
 model.onpointerdown=e=>{
-  if(gesture||e.button!==0)return;e.preventDefault();model.focus({preventScroll:true});
-  const id=e.target.closest("[data-piece]")?.dataset.piece,pan=e.shiftKey;
+  if(!in3D()||gesture||e.button!==0)return;e.preventDefault();model.focus({preventScroll:true});
+  const pan=e.shiftKey,id=!pan&&pickPiece(e);
   gesture={id:e.pointerId,kind:pan?"pan":id?"move":"orbit",sx:e.clientX,sy:e.clientY,view:{...viewer},moved:false};
-  if(gesture.kind==="move"){selection=id;const p=piece(),pt=groundAt(e);Object.assign(gesture,{dx:p.x-pt.x,dy:p.y-pt.y,before:JSON.stringify(plan)});renderSelection()}
+  if(gesture.kind==="move"){selection=id;const p=piece(),pt=groundAt(e);Object.assign(gesture,{dx:p.x-pt.x,dy:p.y-pt.y,before:JSON.stringify(plan)});renderSelection();queueModel()}
   model.setPointerCapture(e.pointerId);
 };
 function modelMove(e){
@@ -479,7 +514,7 @@ function modelMove(e){
   if(!g.moved&&Math.hypot(dx,dy)<3)return;g.moved=true;
   if(g.kind==="orbit"){viewer.yaw=(g.view.yaw+dx*.009)%(2*Math.PI);viewer.tilt=clamp(g.view.tilt+dy*.007,.22,1.37)}
   else if(g.kind==="pan"){viewer.panX=g.view.panX+dx/camera.w;viewer.panY=g.view.panY+dy/camera.h}
-  else{const p=piece(),pt=groundAt(e),pos=locate(room(),spec(p.type),p.rot,pt.x+g.dx,pt.y+g.dy,plan.snap);if(pos){Object.assign(p,pos);renderSelection()}}
+  else{const p=piece(),pt=groundAt(e),pos=locate(room(),spec(p.type),p.rot,pt.x+g.dx,pt.y+g.dy,plan.snap);if(pos&&(pos.x!==p.x||pos.y!==p.y)){Object.assign(p,pos);mesh=null;renderSelection()}}
   queueModel();
 }
 function modelEnd(e,cancel){const g=gesture;if(!g||g.id!==e.pointerId)return;
@@ -500,7 +535,7 @@ const board=$("board");board.onpointerdown=e=>{
 };
 function movePiece(e){if(!drag||drag.id!==e.pointerId)return;if(!drag.moved&&Math.hypot(e.clientX-drag.startX,e.clientY-drag.startY)<3)return;drag.moved=true;const pt=point(e),p=piece(),s=spec(p.type),pos=locate(room(),s,p.rot,pt.x+drag.dx,pt.y+drag.dy,plan.snap);if(pos){Object.assign(p,pos);drag.node.setAttribute("transform",`translate(${p.x} ${p.y}) rotate(${p.rot}) translate(${-s.w/2} ${-s.d/2})`);renderSelection()}}
 board.onpointermove=movePiece;
-function endDrag(e,cancel){if(!drag||drag.id!==e.pointerId)return;if(!cancel)movePiece(e);const {before}=drag;drag=null;if(board.hasPointerCapture(e.pointerId))board.releasePointerCapture(e.pointerId);if(cancel)plan=JSON.parse(before);else if(before!==JSON.stringify(plan)){remember(before);persist()}render()}
+function endDrag(e,cancel){if(!drag||drag.id!==e.pointerId)return;if(!cancel)movePiece(e);const {before}=drag;drag=null;if(board.hasPointerCapture(e.pointerId))board.releasePointerCapture(e.pointerId);if(cancel)plan=JSON.parse(before);else if(before!==JSON.stringify(plan)){mesh=null;remember(before);persist()}render()}
 board.onpointerup=e=>endDrag(e,false);board.onpointercancel=e=>endDrag(e,true);board.onlostpointercapture=e=>endDrag(e,true);
 $("gallery").onclick=e=>{const b=e.target.closest("[data-type]");if(b)addPiece(b.dataset.type);else if(e.target.closest("#first-piece"))customForm()};
 const dragType="application/x-roomfold-furniture";
@@ -543,7 +578,7 @@ function visitPlace(index){
   const [x,y]=project3(p.slice(1,4));viewer.panX=(camera.w*.5-x)/camera.w;viewer.panY=(camera.h*.52-y)/camera.h;drawModel();notify(p[0]);
 }
 function roomsMenu(){
-  const stops=places(room());modal("Rooms & places",`${stops.length?`<h3>Camera bookmarks</h3><div class="fields">${stops.map(([label],i)=>`<button data-place="${i}">${label}</button>`).join("")}</div>`:""}<h3>Room plans</h3><div class="modal-list">${plan.rooms.map(r=>`<button class="wide" data-go="${esc(r.id)}"><span>${esc(r.name)}<br><small>${dims(r.w,r.d)}</small></span><small>${r.id===plan.active?"Fit room":"Open \u2192"}</small></button>`).join("")}</div><button class="primary wide" id="new-room">Add empty room <span>+</span></button>`);
+  const stops=gpu?places(room()):[];modal("Rooms & places",`${stops.length?`<h3>Camera bookmarks</h3><div class="fields">${stops.map(([label],i)=>`<button data-place="${i}">${label}</button>`).join("")}</div>`:""}<h3>Room plans</h3><div class="modal-list">${plan.rooms.map(r=>`<button class="wide" data-go="${esc(r.id)}"><span>${esc(r.name)}<br><small>${dims(r.w,r.d)}</small></span><small>${r.id===plan.active?"Fit room":"Open \u2192"}</small></button>`).join("")}</div><button class="primary wide" id="new-room">Add empty room <span>+</span></button>`);
   $("body").querySelectorAll("[data-place]").forEach(b=>b.onclick=()=>visitPlace(+b.dataset.place));
   $("body").querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>goRoom(b.dataset.go));$("new-room").onclick=()=>roomForm(true);
 }
@@ -645,7 +680,12 @@ document.addEventListener("keydown",e=>{if(dlg.open||drag||gesture||/^(INPUT|SEL
   else if(!e.metaKey&&!e.ctrlKey&&!e.altKey&&e.key.toLowerCase()==="f"&&in3D()){$("camera-fit").click();tools(null)}
   else if(e.key==="Escape"){if(!$("tray").hidden)tools(null,true);else{selection=null;render()}}
 });
-render();
+function startModel(){try{gpu=initGPU()}catch(error){console.warn("WebGL2 renderer unavailable:",error);gpu=null}mesh=null;render()}
+model.addEventListener("webglcontextlost",e=>{
+  e.preventDefault();gpu=null;mesh=null;if(gesture)modelEnd({pointerId:gesture.id},true);else render();
+});
+model.addEventListener("webglcontextrestored",startModel);
+startModel();
 if(loadIssue){$("status").textContent="Use Save HTML copy";$("status").classList.add("bad");notify(loadIssue)}
 else if(embedded)$("status").textContent="Offline copy";
 </script></body></html>
